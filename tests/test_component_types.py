@@ -84,6 +84,66 @@ class TestKnownComponentTypes:
         assert _with_code(issues, "UNKNOWN_PROP") == []
 
 
+class TestUnknownComponentType:
+    def test_unknown_type_is_a_warning_not_an_error(self):
+        linter, issues = _lint_root(
+            {"type": "ia.display.lable", "meta": {"name": "StatusLabel"}}
+        )
+        warnings = _with_code(issues, "UNKNOWN_COMPONENT_TYPE")
+        assert len(warnings) == 1
+        assert warnings[0].severity == LintSeverity.WARNING
+        assert "ia.display.lable" in warnings[0].message
+        assert _with_code(issues, "SCHEMA_VALIDATION") == []
+        assert linter.component_stats["invalid_components"] == 0
+
+    def test_unknown_category_is_a_warning(self):
+        _, issues = _lint_root({"type": "ia.newcategory.widget", "meta": {"name": "W"}})
+        assert len(_with_code(issues, "UNKNOWN_COMPONENT_TYPE")) == 1
+        assert _with_code(issues, "SCHEMA_VALIDATION") == []
+
+    def test_rest_of_unknown_component_is_still_checked(self):
+        _, issues = _lint_root(
+            {
+                "type": "ia.display.brand-new",
+                "meta": {"name": "BrandNew"},
+                "position": {"grow": -1},
+            }
+        )
+        assert len(_with_code(issues, "UNKNOWN_COMPONENT_TYPE")) == 1
+        errors = _with_code(issues, "SCHEMA_VALIDATION")
+        assert len(errors) == 1
+        assert "type" not in errors[0].message
+
+    def test_unknown_child_is_reported_once_on_the_child(self):
+        _, issues = _lint_root(
+            {
+                "type": "ia.container.flex",
+                "meta": {"name": "Root"},
+                "props": {"direction": "column"},
+                "children": [
+                    {
+                        "type": "ia.display.brand-new",
+                        "meta": {"name": "BrandNew"},
+                        "position": {"basis": "50px"},
+                    },
+                    {
+                        "type": "ia.display.label",
+                        "meta": {"name": "StatusLabel"},
+                        "position": {"basis": "50px"},
+                        "props": {"text": "ok"},
+                    },
+                ],
+            }
+        )
+        warnings = _with_code(issues, "UNKNOWN_COMPONENT_TYPE")
+        assert [w.component_path for w in warnings] == ["root.root.children[0]"]
+        assert _with_code(issues, "SCHEMA_VALIDATION") == []
+
+    def test_unknown_type_does_not_fail_default_threshold(self):
+        _, issues = _lint_root({"type": "ia.display.brand-new", "meta": {"name": "B"}})
+        assert not any(i.severity == LintSeverity.ERROR for i in issues)
+
+
 @pytest.fixture(scope="module")
 def type_schema():
     with open(schema_path_for("robust"), encoding="utf-8") as f:

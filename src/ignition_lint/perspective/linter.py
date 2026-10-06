@@ -24,6 +24,8 @@ from typing import Any
 
 try:
     from jsonschema import ValidationError, validate
+    from jsonschema.exceptions import best_match
+    from jsonschema.validators import validator_for
 
     JSONSCHEMA_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional dependency
@@ -57,6 +59,7 @@ class IgnitionPerspectiveLinter:
         self.schema_path = schema_path
         self.jsonschema_available = JSONSCHEMA_AVAILABLE and validate is not None
         self.schema = self._load_schema(schema_path)
+        self._schema_validator = None
         self.issues: list[LintIssue] = []
         self.component_stats = {
             "total_files": 0,
@@ -257,24 +260,72 @@ class IgnitionPerspectiveLinter:
                 )
             return True
 
-        try:
-            validate(instance=component, schema=self.schema)
-            return True
-        except ValidationError as e:
+        if self._schema_validator is None:
+            validator_cls = validator_for(self.schema)
+            validator_cls.check_schema(self.schema)
+            self._schema_validator = validator_cls(self.schema)
+
+        errors = []
+        unknown_type = False
+        for error in self._schema_validator.iter_errors(component):
+            if not self._is_component_type_error(error):
+                errors.append(error)
+            elif len(error.absolute_path) == 1:
+                unknown_type = True
+            # A child's unknown type is reported when the child itself is linted.
+
+        if unknown_type:
+            comp_type = component.get("type")
             self.issues.append(
                 LintIssue(
-                    severity=LintSeverity.ERROR,
-                    code="SCHEMA_VALIDATION",
-                    message=f"Schema validation failed: {e.message}",
+                    severity=LintSeverity.WARNING,
+                    code="UNKNOWN_COMPONENT_TYPE",
+                    message=f"Unknown component type '{comp_type}'",
                     file_path=file_path,
                     component_path=component_path,
-                    component_type=component.get("type", "unknown"),
-                    suggestion=f"Path: {'.'.join(map(str, e.absolute_path))}"
-                    if e.absolute_path
-                    else None,
+                    component_type=comp_type,
+                    suggestion="Check the type for a typo. If it is a component "
+                    "from a newer Ignition version, regenerate the component "
+                    "list (python -m ignition_lint.schemas.generate).",
                 )
             )
+
+        if not errors:
+            return True
+        e = best_match(errors)
+        self.issues.append(
+            LintIssue(
+                severity=LintSeverity.ERROR,
+                code="SCHEMA_VALIDATION",
+                message=f"Schema validation failed: {e.message}",
+                file_path=file_path,
+                component_path=component_path,
+                component_type=component.get("type", "unknown"),
+                suggestion=(
+                    f"Path: {'.'.join(map(str, e.absolute_path))}"
+                    if e.absolute_path
+                    else None
+                ),
+            )
+        )
+        return False
+
+    @staticmethod
+    def _is_component_type_error(error: ValidationError) -> bool:
+        """True if the error only says a component's ``type`` is not listed.
+
+        Matches ``type`` on the component itself or on a nested child
+        (``children.0.type``), not a prop or binding that happens to be
+        called ``type``.
+        """
+        path = list(error.absolute_path)
+        if error.validator not in ("enum", "pattern") or path[-1:] != ["type"]:
             return False
+        nesting = path[:-1]
+        return len(nesting) % 2 == 0 and all(
+            key == "children" and isinstance(index, int)
+            for key, index in zip(nesting[::2], nesting[1::2], strict=True)
+        )
 
     def check_component_best_practices(
         self, component: dict, file_path: str, component_path: str

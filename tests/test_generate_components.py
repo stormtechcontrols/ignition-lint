@@ -3,6 +3,8 @@
 import io
 import json
 import re
+import shutil
+import subprocess
 import zipfile
 
 import pytest
@@ -228,3 +230,110 @@ class TestMain:
         code = generate.main(["--source", str(tmp_path / "missing")])
         assert code == 1
         assert "missing" in capsys.readouterr().err
+
+
+def _schema_files(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    schema_file = out / "schema.json"
+    props_file = out / "props.json"
+    schema_file.write_text(
+        json.dumps({"properties": {"type": {"type": "string", "enum": []}}})
+    )
+    props_file.write_text("{}")
+    return ["--schema", str(schema_file), "--component-props", str(props_file)]
+
+
+class TestMalformedResources:
+    @pytest.mark.parametrize(
+        "content",
+        [
+            b"{not json",
+            b"\x80\x81 not utf-8",
+            b"[]",
+            b'{"components": {"id": "ia.display.label"}}',
+            b'{"components": ["ia.display.label"]}',
+        ],
+        ids=["bad-json", "bad-encoding", "not-object", "not-list", "not-objects"],
+    )
+    def test_is_reported_with_archive_and_resource(self, tmp_path, capsys, content):
+        source = tmp_path / "modules"
+        source.mkdir()
+        _write_modl(
+            source / "Broken-module.modl",
+            "Broken",
+            "1.0.0",
+            {"broken.jar": {"broken.components.json": content}},
+        )
+
+        code = generate.main(["--source", str(source)] + _schema_files(tmp_path))
+
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "broken.components.json" in err
+        assert "Broken-module.modl" in err
+        assert "Traceback" not in err
+
+
+class FakeDocker:
+    """Stands in for subprocess.run; fails the docker step named by ``fail``."""
+
+    def __init__(self, modules_dir=None, fail=None):
+        self.modules_dir = modules_dir
+        self.fail = fail
+        self.calls = []
+
+    def __call__(self, cmd, check=False, capture_output=False, text=False):
+        self.calls.append(cmd)
+        step = cmd[1]
+        if step == self.fail:
+            raise subprocess.CalledProcessError(1, cmd, stderr=f"{step} broke\n")
+        if step == "cp":
+            shutil.copytree(self.modules_dir, cmd[3])
+        return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
+
+
+class TestImage:
+    @pytest.fixture
+    def docker_on_path(self, monkeypatch):
+        monkeypatch.setattr(generate.shutil, "which", lambda name: "/bin/docker")
+
+    def _run(self, monkeypatch, fake, tmp_path):
+        monkeypatch.setattr(generate.subprocess, "run", fake)
+        return generate.main(
+            ["--image", "inductiveautomation/ignition:8.3.9"] + _schema_files(tmp_path)
+        )
+
+    def test_reads_modules_from_the_image(
+        self, monkeypatch, tmp_path, modules_dir, docker_on_path
+    ):
+        fake = FakeDocker(modules_dir)
+        assert self._run(monkeypatch, fake, tmp_path) == 0
+        assert [c[1] for c in fake.calls] == ["create", "cp", "rm"]
+        assert fake.calls[1][2] == f"abc123:{generate.IMAGE_MODULES_DIR}"
+        assert fake.calls[2] == ["docker", "rm", "abc123"]
+        schema = json.loads((tmp_path / "out" / "schema.json").read_text())
+        assert "Ignition 8.3.9" in schema["properties"]["type"]["$comment"]
+
+    def test_missing_docker_is_reported(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr(generate.shutil, "which", lambda name: None)
+        fake = FakeDocker()
+        assert self._run(monkeypatch, fake, tmp_path) == 1
+        assert fake.calls == []
+        assert "docker" in capsys.readouterr().err
+
+    def test_failed_create_reports_docker_stderr(
+        self, monkeypatch, tmp_path, capsys, docker_on_path
+    ):
+        fake = FakeDocker(fail="create")
+        assert self._run(monkeypatch, fake, tmp_path) == 1
+        assert [c[1] for c in fake.calls] == ["create"]
+        assert "create broke" in capsys.readouterr().err
+
+    def test_container_is_removed_when_copy_fails(
+        self, monkeypatch, tmp_path, capsys, docker_on_path
+    ):
+        fake = FakeDocker(fail="cp")
+        assert self._run(monkeypatch, fake, tmp_path) == 1
+        assert fake.calls[-1] == ["docker", "rm", "abc123"]
+        assert "cp broke" in capsys.readouterr().err

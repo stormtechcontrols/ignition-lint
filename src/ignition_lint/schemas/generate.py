@@ -73,11 +73,24 @@ def _iter_jars(archive: zipfile.ZipFile) -> Iterator[zipfile.ZipFile]:
             continue
 
 
-def _component_definitions(jar: zipfile.ZipFile) -> Iterator[dict]:
+def _component_definitions(jar: zipfile.ZipFile, source: Path) -> Iterator[dict]:
     for name in jar.namelist():
-        if name.endswith(".components.json"):
+        if not name.endswith(".components.json"):
+            continue
+        where = f"{name} in {source}"
+        try:
             data = json.loads(jar.read(name))
-            yield from data.get("components", [])
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise GenerateError(f"Cannot read {where}: {e}") from e
+        components = data.get("components", []) if isinstance(data, dict) else None
+        if not isinstance(components, list) or not all(
+            isinstance(c, dict) for c in components
+        ):
+            raise GenerateError(
+                f"Unexpected {where}: expected an object whose 'components' "
+                "is a list of objects"
+            )
+        yield from components
 
 
 def _module_name_version(modl: zipfile.ZipFile) -> tuple[str, str] | None:
@@ -114,7 +127,7 @@ def extract_components(sources: Iterable[Path]) -> Extracted:
             jars = list(_iter_jars(archive)) if path.suffix == ".modl" else [archive]
             count = 0
             for jar in jars:
-                for definition in _component_definitions(jar):
+                for definition in _component_definitions(jar, path):
                     comp_id = definition.get("id")
                     if not comp_id:
                         continue

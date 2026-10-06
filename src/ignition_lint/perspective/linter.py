@@ -241,7 +241,11 @@ class IgnitionPerspectiveLinter:
         return components
 
     def validate_component_schema(
-        self, component: dict, file_path: str, component_path: str
+        self,
+        component: dict,
+        file_path: str,
+        component_path: str,
+        target_component_type: str | None = None,
     ) -> bool:
         """Validate a component against the schema."""
         if not self.jsonschema_available or validate is None:
@@ -266,23 +270,29 @@ class IgnitionPerspectiveLinter:
             self._schema_validator = validator_cls(self.schema)
 
         errors = []
-        unknown_type = False
+        unknown: dict[str, Any] = {}
         for error in self._schema_validator.iter_errors(component):
             if not self._is_component_type_error(error):
                 errors.append(error)
-            elif len(error.absolute_path) == 1:
-                unknown_type = True
-            # A child's unknown type is reported when the child itself is linted.
+                continue
+            nesting = list(error.absolute_path)[:-1]
+            # A nested type is reported by the nearest component on its path
+            # that gets its own lint pass; report it here only if none does.
+            if self._linted_on_path(component, nesting, target_component_type):
+                continue
+            unknown_path = component_path + "".join(
+                f".children[{index}]" for index in nesting[1::2]
+            )
+            unknown[unknown_path] = error.instance
 
-        if unknown_type:
-            comp_type = component.get("type")
+        for unknown_path, comp_type in unknown.items():
             self.issues.append(
                 LintIssue(
                     severity=LintSeverity.WARNING,
                     code="UNKNOWN_COMPONENT_TYPE",
                     message=f"Unknown component type '{comp_type}'",
                     file_path=file_path,
-                    component_path=component_path,
+                    component_path=unknown_path,
                     component_type=comp_type,
                     suggestion="Check the type for a typo. If it is a component "
                     "from a newer Ignition version, regenerate the component "
@@ -308,6 +318,30 @@ class IgnitionPerspectiveLinter:
                 ),
             )
         )
+        return False
+
+    @staticmethod
+    def _is_linted_component(node: Any, target_component_type: str | None) -> bool:
+        """True if lint_file gives this node its own component lint pass."""
+        comp_type = node.get("type") if isinstance(node, dict) else None
+        return (
+            isinstance(comp_type, str)
+            and comp_type.startswith("ia.")
+            and (
+                not target_component_type or comp_type.startswith(target_component_type)
+            )
+        )
+
+    @classmethod
+    def _linted_on_path(
+        cls, component: dict, nesting: list, target_component_type: str | None
+    ) -> bool:
+        """True if any descendant along ``children.i.children.j...`` is linted."""
+        node: Any = component
+        for index in nesting[1::2]:
+            node = node["children"][index]
+            if cls._is_linted_component(node, target_component_type):
+                return True
         return False
 
     @staticmethod
@@ -2096,7 +2130,7 @@ class IgnitionPerspectiveLinter:
 
             # Schema validation
             is_valid = self.validate_component_schema(
-                component, file_path, component_path
+                component, file_path, component_path, target_component_type
             )
             if is_valid:
                 self.component_stats["valid_components"] += 1

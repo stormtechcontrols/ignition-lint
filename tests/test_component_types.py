@@ -14,7 +14,7 @@ from ignition_lint.schemas import schema_path_for
 COMPONENT_PROPS = schema_path_for("robust").parent / "component-props.json"
 
 
-def _lint_root(root):
+def _lint_root(root, target_component_type=None):
     """Lint a view whose root component is ``root``; return (linter, issues)."""
     linter = IgnitionPerspectiveLinter()
     tmpdir = tempfile.mkdtemp()
@@ -22,7 +22,7 @@ def _lint_root(root):
     with open(path, "w") as f:
         json.dump({"custom": {}, "params": {}, "props": {}, "root": root}, f)
     try:
-        linter.lint_file(path)
+        linter.lint_file(path, target_component_type)
     finally:
         os.unlink(path)
         os.rmdir(tmpdir)
@@ -142,6 +142,67 @@ class TestUnknownComponentType:
     def test_unknown_type_does_not_fail_default_threshold(self):
         _, issues = _lint_root({"type": "ia.display.brand-new", "meta": {"name": "B"}})
         assert not any(i.severity == LintSeverity.ERROR for i in issues)
+
+
+def _flex(name, *children):
+    return {
+        "type": "ia.container.flex",
+        "meta": {"name": name},
+        "props": {"direction": "column"},
+        "position": {"basis": "50px"},
+        "children": list(children),
+    }
+
+
+def _leaf(comp_type, name="Thing"):
+    return {"type": comp_type, "meta": {"name": name}, "position": {"basis": "50px"}}
+
+
+class TestUnknownChildNotLintedOnItsOwn:
+    """A child is linted on its own only if its type starts with ``ia.`` (and
+    matches --component). Otherwise its unknown type is reported by the nearest
+    ancestor that is linted, exactly once."""
+
+    def test_child_without_ia_prefix_is_reported(self):
+        _, issues = _lint_root(_flex("Root", _leaf("ai.display.label")))
+        warnings = _with_code(issues, "UNKNOWN_COMPONENT_TYPE")
+        assert [(w.component_path, w.component_type) for w in warnings] == [
+            ("root.root.children[0]", "ai.display.label")
+        ]
+        assert _with_code(issues, "SCHEMA_VALIDATION") == []
+
+    def test_grandchild_is_reported_once_by_nearest_linted_ancestor(self):
+        _, issues = _lint_root(_flex("Root", _flex("Inner", _leaf("ai.display.label"))))
+        warnings = _with_code(issues, "UNKNOWN_COMPONENT_TYPE")
+        assert [w.component_path for w in warnings] == [
+            "root.root.children[0].children[0]"
+        ]
+
+    def test_grandchild_under_unlinted_parent_is_reported_by_grandparent(self):
+        _, issues = _lint_root(
+            _flex("Root", {**_flex("Inner", _leaf("ai.x")), "type": "ai.flex"})
+        )
+        warnings = _with_code(issues, "UNKNOWN_COMPONENT_TYPE")
+        assert sorted(w.component_path for w in warnings) == [
+            "root.root.children[0]",
+            "root.root.children[0].children[0]",
+        ]
+
+    def test_child_excluded_by_component_filter_is_reported(self):
+        _, issues = _lint_root(
+            _flex("Root", _leaf("ia.input.buton"), _leaf("ia.container.typo")),
+            target_component_type="ia.container",
+        )
+        warnings = _with_code(issues, "UNKNOWN_COMPONENT_TYPE")
+        assert sorted(w.component_path for w in warnings) == [
+            "root.root.children[0]",
+            "root.root.children[1]",
+        ]
+
+    def test_ia_child_is_still_reported_only_on_itself(self):
+        _, issues = _lint_root(_flex("Root", _leaf("ia.display.brand-new")))
+        warnings = _with_code(issues, "UNKNOWN_COMPONENT_TYPE")
+        assert [w.component_path for w in warnings] == ["root.root.children[0]"]
 
 
 @pytest.fixture(scope="module")

@@ -653,6 +653,11 @@ class IgnitionPerspectiveLinter:
         "onBlur": "focus",
     }
 
+    # The Designer saves every browser (DOM) event -- mouse, pointer, keyboard
+    # and focus -- under ``events.dom`` (the category the component schema
+    # lists), so ``events.dom.onClick`` is where a click handler belongs.
+    _DOM_EVENT_CATEGORIES = frozenset({"mouse", "pointer", "keyboard", "focus"})
+
     def _validate_bindings(self, component: dict, file_path: str, component_path: str):
         """Validate bindings based on empirical analysis patterns."""
         prop_config = component.get("propConfig", {})
@@ -1025,9 +1030,11 @@ class IgnitionPerspectiveLinter:
                 for event_name, handler_config in handlers.items():
                     # Check that event is under the correct category
                     expected_category = self._EVENT_CATEGORY_MAP.get(event_name)
+                    is_dom_event = expected_category in self._DOM_EVENT_CATEGORIES
                     if (
                         expected_category is not None
                         and event_category != expected_category
+                        and not (is_dom_event and event_category == "dom")
                     ):
                         self.issues.append(
                             LintIssue(
@@ -1040,7 +1047,11 @@ class IgnitionPerspectiveLinter:
                                 file_path=file_path,
                                 component_path=component_path,
                                 component_type=comp_type,
-                                suggestion=f"Move to events.{expected_category}.{event_name}",
+                                suggestion=(
+                                    f"Move to events.dom.{event_name}"
+                                    if is_dom_event
+                                    else f"Move to events.{expected_category}.{event_name}"
+                                ),
                             )
                         )
 

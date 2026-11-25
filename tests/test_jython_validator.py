@@ -365,7 +365,7 @@ class TestContinuationLines:
         assert "JYTHON_MIXED_INDENTATION" not in codes
 
     def test_backslash_continuation(self):
-        script = "\ttotal = 1 + \\n\t\t\t\t2\n\treturn total"
+        script = "\ttotal = 1 + \\\n\t\t\t\t2\n\treturn total"
         codes = {issue.code for issue in validate(script)}
         assert "JYTHON_INDENTATION_JUMP" not in codes
 

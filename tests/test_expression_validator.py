@@ -520,3 +520,48 @@ class TestAdjacentExpressions:
             expr, "test", "file.json", "root", "ia.display.label"
         )
         assert "EXPR_ADJACENT_EXPRESSIONS" not in _codes(issues)
+
+    # Double-quoted strings are Ignition string literals too (storm-tooling#38).
+    def test_double_quoted_hex_colour_not_flagged(self, validator):
+        expr = 'if({view.custom.active}, "#2B2B2B", "#FFFFFF")'
+        issues = validator.validate_expression(
+            expr, "test", "file.json", "root", "ia.display.label"
+        )
+        assert "EXPR_ADJACENT_EXPRESSIONS" not in _codes(issues)
+
+    def test_double_quoted_literal_with_spaces_not_flagged(self, validator):
+        expr = (
+            'if(coalesce(tag("[default]Area/MsgRequest"), false), "SENDING TO CARD...", '
+            '"CARD UPDATE FAILED - ERR " + toStr(coalesce(tag("[default]Area/MsgErrCode"), 0)))'
+        )
+        issues = validator.validate_expression(
+            expr, "test", "file.json", "root", "ia.display.label"
+        )
+        codes = _codes(issues)
+        assert "EXPR_ADJACENT_EXPRESSIONS" not in codes
+        assert "EXPR_UNMATCHED_QUOTE" not in codes
+
+    def test_double_quoted_string_then_ref_flagged(self, validator):
+        issues = validator.validate_expression(
+            '"a" {view.custom.x}', "test", "file.json", "root", "ia.display.label"
+        )
+        assert "EXPR_ADJACENT_EXPRESSIONS" in _codes(issues)
+
+    def test_other_quote_inside_string_ignored(self, validator):
+        expr = "\"it's (fine\" + 'say \"hi\" {'"
+        issues = validator.validate_expression(
+            expr, "test", "file.json", "root", "ia.display.label"
+        )
+        codes = _codes(issues)
+        assert not codes & {
+            "EXPR_ADJACENT_EXPRESSIONS",
+            "EXPR_UNMATCHED_QUOTE",
+            "EXPR_UNMATCHED_PAREN",
+            "EXPR_UNMATCHED_BRACE",
+        }
+
+    def test_unclosed_double_quote_flagged(self, validator):
+        issues = validator.validate_expression(
+            '"abc', "test", "file.json", "root", "ia.display.label"
+        )
+        assert "EXPR_UNMATCHED_QUOTE" in _codes(issues)

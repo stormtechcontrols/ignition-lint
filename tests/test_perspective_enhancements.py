@@ -422,6 +422,74 @@ class TestPropertyBindingPathValidation:
         assert "view.custom.auditData" in issue.suggestion
         assert '"path": "view.custom.auditData"' in issue.suggestion
 
+    def test_root_dot_custom_on_root_container_ok(self):
+        """/root.custom.X binds to the root container's custom property: valid
+        when the root defines it (storm-tooling#38)."""
+        view = {
+            "custom": {"range": "day"},
+            "root": {
+                "type": "ia.container.flex",
+                "meta": {"name": "root"},
+                "custom": {"info": {"users": []}},
+                "propConfig": {"custom.info": {"binding": {"type": "expr", "config": {"expression": "1"}}}},
+                "children": [
+                    {
+                        "type": "ia.input.dropdown",
+                        "meta": {"name": "Users"},
+                        "propConfig": {
+                            "props.options": {
+                                "binding": {
+                                    "type": "property",
+                                    "config": {"path": "/root.custom.info.users"},
+                                }
+                            }
+                        },
+                    }
+                ],
+            },
+        }
+        assert "BINDING_ROOT_DOT_PATH" not in _codes(_lint_view(view))
+
+    def test_root_dot_custom_from_root_propconfig_ok(self):
+        """A bound root custom property may live only in propConfig."""
+        view = {
+            "custom": {},
+            "root": {
+                "type": "ia.container.flex",
+                "meta": {"name": "root"},
+                "propConfig": {
+                    "custom.rows": {"binding": {"type": "expr", "config": {"expression": "1"}}},
+                    "props.style.opacity": {
+                        "binding": {"type": "property", "config": {"path": "/root.custom.rows[0]"}}
+                    },
+                },
+                "children": [],
+            },
+        }
+        assert "BINDING_ROOT_DOT_PATH" not in _codes(_lint_view(view))
+
+    def test_root_dot_props_ok(self):
+        """/root.props.X is a property of the root container."""
+        view = {
+            "custom": {},
+            "root": {
+                "type": "ia.container.flex",
+                "meta": {"name": "root"},
+                "children": [
+                    {
+                        "type": "ia.display.label",
+                        "meta": {"name": "Label"},
+                        "propConfig": {
+                            "props.text": {
+                                "binding": {"type": "property", "config": {"path": "/root.props.direction"}}
+                            }
+                        },
+                    }
+                ],
+            },
+        }
+        assert "BINDING_ROOT_DOT_PATH" not in _codes(_lint_view(view))
+
     def test_root_dot_params_flagged(self):
         """Property binding with /root.params.X should be view.params.X."""
         view = {
@@ -1379,7 +1447,7 @@ class TestEventWrongCategory:
         matching = [i for i in issues if i.code == "EVENT_WRONG_CATEGORY"]
         assert len(matching) == 1
         assert "mouse event" in matching[0].message
-        assert matching[0].suggestion == "Move to events.mouse.onClick"
+        assert matching[0].suggestion == "Move to events.dom.onClick"
 
     def test_keyboard_event_under_mouse(self):
         """onKeyDown under events.mouse should flag."""
@@ -1387,7 +1455,7 @@ class TestEventWrongCategory:
         issues = _lint_view(view)
         matching = [i for i in issues if i.code == "EVENT_WRONG_CATEGORY"]
         assert len(matching) == 1
-        assert matching[0].suggestion == "Move to events.keyboard.onKeyDown"
+        assert matching[0].suggestion == "Move to events.dom.onKeyDown"
 
     def test_focus_event_under_component(self):
         """onBlur under events.component should flag."""
@@ -1395,7 +1463,7 @@ class TestEventWrongCategory:
         issues = _lint_view(view)
         matching = [i for i in issues if i.code == "EVENT_WRONG_CATEGORY"]
         assert len(matching) == 1
-        assert matching[0].suggestion == "Move to events.focus.onBlur"
+        assert matching[0].suggestion == "Move to events.dom.onBlur"
 
     def test_pointer_event_under_mouse(self):
         """onPointerDown under events.mouse should flag."""
@@ -1403,7 +1471,23 @@ class TestEventWrongCategory:
         issues = _lint_view(view)
         matching = [i for i in issues if i.code == "EVENT_WRONG_CATEGORY"]
         assert len(matching) == 1
-        assert matching[0].suggestion == "Move to events.pointer.onPointerDown"
+        assert matching[0].suggestion == "Move to events.dom.onPointerDown"
+
+    def test_dom_events_not_flagged(self):
+        """The Designer saves mouse, pointer, keyboard and focus events under
+        events.dom (storm-tooling#38)."""
+        for event_name in ("onClick", "onMouseDown", "onPointerUp", "onKeyDown", "onBlur"):
+            view = self._make_view_with_event("dom", event_name)
+            issues = _lint_view(view)
+            assert "EVENT_WRONG_CATEGORY" not in _codes(issues), event_name
+
+    def test_component_event_under_dom_flagged(self):
+        """dom is only for browser events: onActionPerformed belongs under component."""
+        view = self._make_view_with_event("dom", "onActionPerformed")
+        issues = _lint_view(view)
+        matching = [i for i in issues if i.code == "EVENT_WRONG_CATEGORY"]
+        assert len(matching) == 1
+        assert matching[0].suggestion == "Move to events.component.onActionPerformed"
 
     def test_unknown_event_not_flagged(self):
         """Custom/unknown events should not trigger this rule."""

@@ -64,3 +64,17 @@ class TestRootComponentNaming:
         linter._check_json_structure(data, "test.json")
         component_errors = [e for e in linter.errors if e.error_type == "component"]
         assert len(component_errors) == 0
+
+
+def test_version_flag_prints_installed_version(capsys, monkeypatch):
+    """Scripts compare it with the build they pin (storm-tooling#38)."""
+    import pytest
+
+    from ignition_lint import __version__
+    from ignition_lint.cli import parse_args
+
+    monkeypatch.setattr("sys.argv", ["ignition-lint", "--version"])
+    with pytest.raises(SystemExit) as exc:
+        parse_args()
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"ignition-lint {__version__}"

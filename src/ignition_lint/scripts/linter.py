@@ -25,6 +25,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ..validators.jython import _preprocess_py2
+
 
 class LintSeverity(Enum):
     ERROR = "ERROR"
@@ -253,8 +255,10 @@ class IgnitionScriptLinter:
     def _check_syntax(self, file_path: Path, content: str):
         """Check basic Python syntax."""
         try:
-            # Try to parse with Python AST
-            ast.parse(content)
+            # Project library scripts run on Jython 2.7: rewrite the Python 2
+            # forms Python 3's parser rejects (``except Exception, e:``,
+            # ``print x``) the same way inline scripts are, line for line.
+            ast.parse(_preprocess_py2(content))
         except SyntaxError as e:
             self._add_issue(
                 ScriptLintIssue(

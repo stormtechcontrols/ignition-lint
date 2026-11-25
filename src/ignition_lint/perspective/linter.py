@@ -24,6 +24,8 @@ from typing import Any
 
 try:
     from jsonschema import ValidationError, validate
+    from jsonschema.exceptions import best_match
+    from jsonschema.validators import validator_for
 
     JSONSCHEMA_AVAILABLE = True
 except ImportError:  # pragma: no cover - optional dependency
@@ -57,6 +59,7 @@ class IgnitionPerspectiveLinter:
         self.schema_path = schema_path
         self.jsonschema_available = JSONSCHEMA_AVAILABLE and validate is not None
         self.schema = self._load_schema(schema_path)
+        self._schema_validator = None
         self.issues: list[LintIssue] = []
         self.component_stats = {
             "total_files": 0,
@@ -73,6 +76,8 @@ class IgnitionPerspectiveLinter:
         self._embedded_param_usage: dict[str, set[str]] = {}
         self.jython_validator = JythonValidator()
         self._script_lines = ScriptLineIndex()
+        # Root container of the view being linted (BINDING_ROOT_DOT_PATH).
+        self._view_root: dict = {}
         self.expression_validator = ExpressionValidator()
         self.known_prop_names = self._extract_known_props()
         self._component_props = self._load_component_props()
@@ -238,7 +243,11 @@ class IgnitionPerspectiveLinter:
         return components
 
     def validate_component_schema(
-        self, component: dict, file_path: str, component_path: str
+        self,
+        component: dict,
+        file_path: str,
+        component_path: str,
+        target_component_type: str | None = None,
     ) -> bool:
         """Validate a component against the schema."""
         if not self.jsonschema_available or validate is None:
@@ -257,24 +266,102 @@ class IgnitionPerspectiveLinter:
                 )
             return True
 
-        try:
-            validate(instance=component, schema=self.schema)
-            return True
-        except ValidationError as e:
+        if self._schema_validator is None:
+            validator_cls = validator_for(self.schema)
+            validator_cls.check_schema(self.schema)
+            self._schema_validator = validator_cls(self.schema)
+
+        errors = []
+        unknown: dict[str, Any] = {}
+        for error in self._schema_validator.iter_errors(component):
+            if not self._is_component_type_error(error):
+                errors.append(error)
+                continue
+            nesting = list(error.absolute_path)[:-1]
+            # A nested type is reported by the nearest component on its path
+            # that gets its own lint pass; report it here only if none does.
+            if self._linted_on_path(component, nesting, target_component_type):
+                continue
+            unknown_path = component_path + "".join(
+                f".children[{index}]" for index in nesting[1::2]
+            )
+            unknown[unknown_path] = error.instance
+
+        for unknown_path, comp_type in unknown.items():
             self.issues.append(
                 LintIssue(
-                    severity=LintSeverity.ERROR,
-                    code="SCHEMA_VALIDATION",
-                    message=f"Schema validation failed: {e.message}",
+                    severity=LintSeverity.WARNING,
+                    code="UNKNOWN_COMPONENT_TYPE",
+                    message=f"Unknown component type '{comp_type}'",
                     file_path=file_path,
-                    component_path=component_path,
-                    component_type=component.get("type", "unknown"),
-                    suggestion=f"Path: {'.'.join(map(str, e.absolute_path))}"
-                    if e.absolute_path
-                    else None,
+                    component_path=unknown_path,
+                    component_type=comp_type,
+                    suggestion="Check the type for a typo. If it is a component "
+                    "from a newer Ignition version, regenerate the component "
+                    "list (python -m ignition_lint.schemas.generate).",
                 )
             )
+
+        if not errors:
+            return True
+        e = best_match(errors)
+        self.issues.append(
+            LintIssue(
+                severity=LintSeverity.ERROR,
+                code="SCHEMA_VALIDATION",
+                message=f"Schema validation failed: {e.message}",
+                file_path=file_path,
+                component_path=component_path,
+                component_type=component.get("type", "unknown"),
+                suggestion=(
+                    f"Path: {'.'.join(map(str, e.absolute_path))}"
+                    if e.absolute_path
+                    else None
+                ),
+            )
+        )
+        return False
+
+    @staticmethod
+    def _is_linted_component(node: Any, target_component_type: str | None) -> bool:
+        """True if lint_file gives this node its own component lint pass."""
+        comp_type = node.get("type") if isinstance(node, dict) else None
+        return (
+            isinstance(comp_type, str)
+            and comp_type.startswith("ia.")
+            and (
+                not target_component_type or comp_type.startswith(target_component_type)
+            )
+        )
+
+    @classmethod
+    def _linted_on_path(
+        cls, component: dict, nesting: list, target_component_type: str | None
+    ) -> bool:
+        """True if any descendant along ``children.i.children.j...`` is linted."""
+        node: Any = component
+        for index in nesting[1::2]:
+            node = node["children"][index]
+            if cls._is_linted_component(node, target_component_type):
+                return True
+        return False
+
+    @staticmethod
+    def _is_component_type_error(error: ValidationError) -> bool:
+        """True if the error only says a component's ``type`` is not listed.
+
+        Matches ``type`` on the component itself or on a nested child
+        (``children.0.type``), not a prop or binding that happens to be
+        called ``type``.
+        """
+        path = list(error.absolute_path)
+        if error.validator not in ("enum", "pattern") or path[-1:] != ["type"]:
             return False
+        nesting = path[:-1]
+        return len(nesting) % 2 == 0 and all(
+            key == "children" and isinstance(index, int)
+            for key, index in zip(nesting[::2], nesting[1::2], strict=True)
+        )
 
     def check_component_best_practices(
         self, component: dict, file_path: str, component_path: str
@@ -568,6 +655,11 @@ class IgnitionPerspectiveLinter:
         "onBlur": "focus",
     }
 
+    # The Designer saves every browser (DOM) event -- mouse, pointer, keyboard
+    # and focus -- under ``events.dom`` (the category the component schema
+    # lists), so ``events.dom.onClick`` is where a click handler belongs.
+    _DOM_EVENT_CATEGORIES = frozenset({"mouse", "pointer", "keyboard", "focus"})
+
     def _validate_bindings(self, component: dict, file_path: str, component_path: str):
         """Validate bindings based on empirical analysis patterns."""
         prop_config = component.get("propConfig", {})
@@ -703,6 +795,26 @@ class IgnitionPerspectiveLinter:
                 )
             )
 
+    def _root_defines(self, prop_path: str) -> bool:
+        """True when the view's root container has the property ``prop_path``.
+
+        Only ``custom.X`` is checked against the root's ``custom`` keys and
+        ``propConfig``; ``props``, ``position`` and ``meta`` always exist on a
+        component, and a container has no ``params``.
+        """
+        scope, _, rest = prop_path.partition(".")
+        if scope in ("props", "position", "meta"):
+            return True
+        if scope != "custom" or not rest:
+            return False
+        name = re.split(r"[.\[]", rest, maxsplit=1)[0]
+        root = self._view_root
+        custom = root.get("custom")
+        prop_config = root.get("propConfig")
+        return (isinstance(custom, dict) and name in custom) or (
+            isinstance(prop_config, dict) and f"custom.{name}" in prop_config
+        )
+
     def _validate_property_binding(
         self,
         config: dict,
@@ -732,7 +844,9 @@ class IgnitionPerspectiveLinter:
 
         # /root.custom.X or /root.params.X is a common mistake — should be view.custom.X
         # or view.params.X.  Valid absolute component refs use slashes: /root/Child.props.X
-        if path.startswith("/root."):
+        # "/root" alone is the root container, so /root.custom.X is valid when the
+        # root container defines custom.X (the Designer writes such paths).
+        if path.startswith("/root.") and not self._root_defines(path[len("/root.") :]):
             suffix = path[len("/root.") :]
             self.issues.append(
                 LintIssue(
@@ -940,9 +1054,11 @@ class IgnitionPerspectiveLinter:
                 for event_name, handler_config in handlers.items():
                     # Check that event is under the correct category
                     expected_category = self._EVENT_CATEGORY_MAP.get(event_name)
+                    is_dom_event = expected_category in self._DOM_EVENT_CATEGORIES
                     if (
                         expected_category is not None
                         and event_category != expected_category
+                        and not (is_dom_event and event_category == "dom")
                     ):
                         self.issues.append(
                             LintIssue(
@@ -955,7 +1071,11 @@ class IgnitionPerspectiveLinter:
                                 file_path=file_path,
                                 component_path=component_path,
                                 component_type=comp_type,
-                                suggestion=f"Move to events.{expected_category}.{event_name}",
+                                suggestion=(
+                                    f"Move to events.dom.{event_name}"
+                                    if is_dom_event
+                                    else f"Move to events.{expected_category}.{event_name}"
+                                ),
                             )
                         )
 
@@ -1963,6 +2083,8 @@ class IgnitionPerspectiveLinter:
                 raw_text = f.read()
             view_data = json.loads(raw_text)
             self._script_lines = ScriptLineIndex(raw_text.splitlines())
+            root = view_data.get("root") if isinstance(view_data, dict) else None
+            self._view_root = root if isinstance(root, dict) else {}
         except json.JSONDecodeError as e:
             self.issues.append(
                 LintIssue(
@@ -2045,7 +2167,7 @@ class IgnitionPerspectiveLinter:
 
             # Schema validation
             is_valid = self.validate_component_schema(
-                component, file_path, component_path
+                component, file_path, component_path, target_component_type
             )
             if is_valid:
                 self.component_stats["valid_components"] += 1

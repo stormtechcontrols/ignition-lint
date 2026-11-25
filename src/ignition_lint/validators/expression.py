@@ -173,15 +173,21 @@ _INTERNAL_INDEX_RE = re.compile(r"\{([^}\[]+)\[")
 _SIZE_GUARD_FUNCS = {"len", "jsonLength", "rowCount", "columnCount"}
 
 
+# Ignition expression string literals are single- or double-quoted
+# ("#2B2B2B" and 'TAP TO CARD' are both one string).
+_QUOTES = "'\""
+
+
 def _skip_string(expression: str, start: int) -> tuple[int, bool]:
     """Skip from opening quote to closing quote. Returns (end_pos, closed).
 
-    Ignition expressions use single quotes for strings with no backslash escaping.
-    ``start`` must point to the opening ``'``.
+    Strings use single or double quotes, closed by the same quote character,
+    with no backslash escaping.  ``start`` must point to the opening quote.
     """
+    quote = expression[start]
     i = start + 1
     while i < len(expression):
-        if expression[i] == "'":
+        if expression[i] == quote:
             return (i, True)
         i += 1
     return (len(expression) - 1, False)
@@ -473,7 +479,7 @@ class ExpressionValidator:
         last_extra_close = -1
         while i < len(expression):
             ch = expression[i]
-            if ch == "'":
+            if ch in _QUOTES:
                 end, _closed = _skip_string(expression, i)
                 i = end + 1
                 continue
@@ -531,7 +537,7 @@ class ExpressionValidator:
         last_extra_close = -1
         while i < len(expression):
             ch = expression[i]
-            if ch == "'":
+            if ch in _QUOTES:
                 end, _closed = _skip_string(expression, i)
                 i = end + 1
                 continue
@@ -570,11 +576,11 @@ class ExpressionValidator:
     def _check_unmatched_string_quotes(
         self, expression: str, file_path: str, component_path: str, component_type: str
     ) -> list[LintIssue]:
-        """Detect unclosed string literals (single quotes)."""
+        """Detect unclosed string literals (single or double quotes)."""
         issues: list[LintIssue] = []
         i = 0
         while i < len(expression):
-            if expression[i] == "'":
+            if expression[i] in _QUOTES:
                 end, closed = _skip_string(expression, i)
                 if not closed:
                     issues.append(
@@ -585,7 +591,7 @@ class ExpressionValidator:
                             file_path=file_path,
                             component_path=component_path,
                             component_type=component_type,
-                            suggestion="Add missing closing single quote",
+                            suggestion="Add the missing closing quote",
                             column=i + 1,  # 1-indexed
                         )
                     )
@@ -634,7 +640,7 @@ class ExpressionValidator:
             ch = expression[i]
 
             # --- String literal (value) ---
-            if ch == "'":
+            if ch in _QUOTES:
                 if last_value_end >= 0 and not _has_operator_between(last_value_end, i):
                     _flag("string literal after value", i)
                 end, closed = _skip_string(expression, i)

@@ -349,3 +349,41 @@ class TestScriptLineIndex:
         assert index.line_for(script) == 4
         # Exhausted — reuse the last occurrence rather than losing the anchor.
         assert index.line_for(script) == 4
+
+
+class TestContinuationLines:
+    """Bracket and backslash continuations are aligned, not indented (storm-tooling#38)."""
+
+    def test_bracket_continuation_aligned_with_spaces(self):
+        script = (
+            "\td = system.util.jsonDecode(value) or {}\n"
+            "\treturn {'users': list(d.get('users') or []), 'areas': list(d.get('areas') or []),\n"
+            "\t        'actions': list(d.get('actions') or [])}"
+        )
+        codes = {issue.code for issue in validate(script)}
+        assert "JYTHON_INDENTATION_JUMP" not in codes
+        assert "JYTHON_MIXED_INDENTATION" not in codes
+
+    def test_backslash_continuation(self):
+        script = "\ttotal = 1 + \\n\t\t\t\t2\n\treturn total"
+        codes = {issue.code for issue in validate(script)}
+        assert "JYTHON_INDENTATION_JUMP" not in codes
+
+    def test_bracket_in_string_or_comment_not_counted(self):
+        script = (
+            "\ts = '(' + \"[\"  # {\n"
+            "\tif s:\n"
+            "\t\t\t\treturn s"
+        )
+        codes = {issue.code for issue in validate(script)}
+        assert "JYTHON_INDENTATION_JUMP" in codes
+
+    def test_jump_after_closed_brackets_still_flagged(self):
+        script = (
+            "\tx = foo(1,\n"
+            "\t        2)\n"
+            "\tif x:\n"
+            "\t\t\t\treturn x"
+        )
+        codes = {issue.code for issue in validate(script)}
+        assert "JYTHON_INDENTATION_JUMP" in codes

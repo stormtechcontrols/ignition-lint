@@ -76,6 +76,8 @@ class IgnitionPerspectiveLinter:
         self._embedded_param_usage: dict[str, set[str]] = {}
         self.jython_validator = JythonValidator()
         self._script_lines = ScriptLineIndex()
+        # Root container of the view being linted (BINDING_ROOT_DOT_PATH).
+        self._view_root: dict = {}
         self.expression_validator = ExpressionValidator()
         self.known_prop_names = self._extract_known_props()
         self._component_props = self._load_component_props()
@@ -793,6 +795,26 @@ class IgnitionPerspectiveLinter:
                 )
             )
 
+    def _root_defines(self, prop_path: str) -> bool:
+        """True when the view's root container has the property ``prop_path``.
+
+        Only ``custom.X`` is checked against the root's ``custom`` keys and
+        ``propConfig``; ``props``, ``position`` and ``meta`` always exist on a
+        component, and a container has no ``params``.
+        """
+        scope, _, rest = prop_path.partition(".")
+        if scope in ("props", "position", "meta"):
+            return True
+        if scope != "custom" or not rest:
+            return False
+        name = re.split(r"[.\[]", rest, maxsplit=1)[0]
+        root = self._view_root
+        custom = root.get("custom")
+        prop_config = root.get("propConfig")
+        return (isinstance(custom, dict) and name in custom) or (
+            isinstance(prop_config, dict) and f"custom.{name}" in prop_config
+        )
+
     def _validate_property_binding(
         self,
         config: dict,
@@ -822,7 +844,9 @@ class IgnitionPerspectiveLinter:
 
         # /root.custom.X or /root.params.X is a common mistake — should be view.custom.X
         # or view.params.X.  Valid absolute component refs use slashes: /root/Child.props.X
-        if path.startswith("/root."):
+        # "/root" alone is the root container, so /root.custom.X is valid when the
+        # root container defines custom.X (the Designer writes such paths).
+        if path.startswith("/root.") and not self._root_defines(path[len("/root.") :]):
             suffix = path[len("/root.") :]
             self.issues.append(
                 LintIssue(
@@ -2059,6 +2083,8 @@ class IgnitionPerspectiveLinter:
                 raw_text = f.read()
             view_data = json.loads(raw_text)
             self._script_lines = ScriptLineIndex(raw_text.splitlines())
+            root = view_data.get("root") if isinstance(view_data, dict) else None
+            self._view_root = root if isinstance(root, dict) else {}
         except json.JSONDecodeError as e:
             self.issues.append(
                 LintIssue(

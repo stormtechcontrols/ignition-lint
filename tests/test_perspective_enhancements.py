@@ -422,6 +422,74 @@ class TestPropertyBindingPathValidation:
         assert "view.custom.auditData" in issue.suggestion
         assert '"path": "view.custom.auditData"' in issue.suggestion
 
+    def test_root_dot_custom_on_root_container_ok(self):
+        """/root.custom.X binds to the root container's custom property: valid
+        when the root defines it (storm-tooling#38)."""
+        view = {
+            "custom": {"range": "day"},
+            "root": {
+                "type": "ia.container.flex",
+                "meta": {"name": "root"},
+                "custom": {"info": {"users": []}},
+                "propConfig": {"custom.info": {"binding": {"type": "expr", "config": {"expression": "1"}}}},
+                "children": [
+                    {
+                        "type": "ia.input.dropdown",
+                        "meta": {"name": "Users"},
+                        "propConfig": {
+                            "props.options": {
+                                "binding": {
+                                    "type": "property",
+                                    "config": {"path": "/root.custom.info.users"},
+                                }
+                            }
+                        },
+                    }
+                ],
+            },
+        }
+        assert "BINDING_ROOT_DOT_PATH" not in _codes(_lint_view(view))
+
+    def test_root_dot_custom_from_root_propconfig_ok(self):
+        """A bound root custom property may live only in propConfig."""
+        view = {
+            "custom": {},
+            "root": {
+                "type": "ia.container.flex",
+                "meta": {"name": "root"},
+                "propConfig": {
+                    "custom.rows": {"binding": {"type": "expr", "config": {"expression": "1"}}},
+                    "props.style.opacity": {
+                        "binding": {"type": "property", "config": {"path": "/root.custom.rows[0]"}}
+                    },
+                },
+                "children": [],
+            },
+        }
+        assert "BINDING_ROOT_DOT_PATH" not in _codes(_lint_view(view))
+
+    def test_root_dot_props_ok(self):
+        """/root.props.X is a property of the root container."""
+        view = {
+            "custom": {},
+            "root": {
+                "type": "ia.container.flex",
+                "meta": {"name": "root"},
+                "children": [
+                    {
+                        "type": "ia.display.label",
+                        "meta": {"name": "Label"},
+                        "propConfig": {
+                            "props.text": {
+                                "binding": {"type": "property", "config": {"path": "/root.props.direction"}}
+                            }
+                        },
+                    }
+                ],
+            },
+        }
+        assert "BINDING_ROOT_DOT_PATH" not in _codes(_lint_view(view))
+
     def test_root_dot_params_flagged(self):
         """Property binding with /root.params.X should be view.params.X."""
         view = {

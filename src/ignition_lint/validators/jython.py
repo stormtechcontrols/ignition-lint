@@ -131,6 +131,62 @@ def _preprocess_py2(source: str) -> str:
     return source
 
 
+def _continuation_lines(lines: list[str]) -> set[int]:
+    """1-based numbers of lines that continue the previous logical line.
+
+    A line continues the previous one when it starts inside open brackets
+    (implicit continuation), after a trailing backslash, or inside a
+    triple-quoted string.  Its leading whitespace is alignment, not
+    indentation: ``	        'actions': ...`` inside a dict literal is valid.
+    Strings and comments are skipped so brackets inside them do not count.
+    """
+    continued: set[int] = set()
+    depth = 0
+    quote = ""  # open triple quote carried across lines
+    backslash = False
+    for number, line in enumerate(lines, 1):
+        if depth > 0 or quote or backslash:
+            continued.add(number)
+        backslash = False
+        comment = False
+        i = 0
+        while i < len(line):
+            if quote:
+                if line[i] == "\\":
+                    i += 2
+                    continue
+                if line.startswith(quote, i):
+                    i += len(quote)
+                    quote = ""
+                    continue
+                i += 1
+                continue
+            ch = line[i]
+            if ch == "#":
+                comment = True
+                break
+            if ch in "'\"":
+                triple = ch * 3
+                if line.startswith(triple, i):
+                    quote = triple
+                    i += 3
+                    continue
+                # Single-line string: skip to its closing quote.
+                i += 1
+                while i < len(line) and line[i] != ch:
+                    i += 2 if line[i] == "\\" else 1
+                i += 1
+                continue
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth = max(0, depth - 1)
+            i += 1
+        if not quote and not comment and line.rstrip().endswith("\\"):
+            backslash = True
+    return continued
+
+
 _JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 # Keys whose value can hold an inline script.  Used to skip the ~99% of lines
@@ -298,20 +354,14 @@ class JythonValidator:
         inconsistent_levels = []
 
         previous_indent = 0
-        in_triple_quote = False
+        continued = _continuation_lines(lines)
 
         for index, line in enumerate(lines, 1):
             if not line.strip():
                 continue
-
-            # Track triple-quoted string state; skip content lines inside them
-            was_in_triple = in_triple_quote
-            for tq in ('"""', "'''"):
-                count = line.count(tq)
-                if count % 2 == 1:
-                    in_triple_quote = not in_triple_quote
-                    break
-            if was_in_triple:
+            if index in continued:
+                # Inside brackets, after a backslash or inside a triple-quoted
+                # string: leading whitespace is alignment, not indentation.
                 continue
 
             tabs = len(line) - len(line.lstrip("\t"))

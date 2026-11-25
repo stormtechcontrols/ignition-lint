@@ -9,6 +9,7 @@ import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from . import __version__
 from .json_linter import JsonLinter
 from .json_linter import ValidationError as NamingError
 from .perspective.linter import IgnitionPerspectiveLinter
@@ -206,6 +207,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Lint Ignition projects using built-in validators",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Print the installed version (a pinned build reports its +local tag) and exit",
     )
     parser.add_argument(
         "--project",
